@@ -93,6 +93,9 @@ android {
 
     packaging {
         jniLibs.useLegacyPackaging = true
+        // Lite is MPV-only: KitePlayer's unused native payload would just bloat the APK.
+        jniLibs.excludes += "**/libkitecodec_jni.so"
+        jniLibs.excludes += "**/libkiteplayer_libass_jni.so"
         // Lite ships the classic mpv natives from jniLibs AND KitePlayer's AAR; both carry a
         // libc++_shared.so, so take the first one instead of failing the merge.
         pickFirsts += "**/libc++_shared.so"
