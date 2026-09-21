@@ -69,3 +69,6 @@ desktopApp/resources/
 
 # Lite ships the classic mpv natives on purpose
 !androidApp/src/main/jniLibs/**/*.so
+
+# CA bundle for mpv https playback - keep despite *.pem
+!shared/src/androidMain/assets/cacert.pem

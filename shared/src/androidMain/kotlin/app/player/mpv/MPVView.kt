@@ -132,7 +132,13 @@ class MPVView(context: Context, attrs: AttributeSet) : SurfaceView(context, attr
         // to load the CA bundle, which kills every https:// stream ("Failed to open"). Traffic is
         // still TLS-encrypted; this only skips chain validation.
         MPVLib.setOptionString("tls-verify", "no")
-        MPVLib.setOptionString("tls-ca-file", "${this.context.filesDir.path}/cacert.pem")
+        // LITE: ffmpeg's mbedtls wrapper parses tls-ca-file UNCONDITIONALLY at connection open and
+        // aborts with EIO if the file is unreadable ("mbedtls_x509_crt_parse_file ... -15872").
+        // So only point mpv at a CA bundle that actually exists (cacert.pem is copied from assets
+        // into filesDir by MpvFileUtils.copyAssets()).
+        val caFile = java.io.File("${this.context.filesDir.path}/cacert.pem")
+        if (caFile.isFile && caFile.length() > 0L)
+            MPVLib.setOptionString("tls-ca-file", caFile.path)
         MPVLib.setOptionString("msg-level", "all=v")
         MPVLib.setOptionString("input-default-bindings", "yes")
         // Limit demuxer cache since the defaults are too high for mobile devices
