@@ -202,7 +202,7 @@ class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
                         MPVLib.setPropertyString("sid", "no")
                     }
 
-                    playerManager.currentTrackChoices.subtitleSelectionIndexMpv = track?.index ?: -1
+                    playerManager.currentTrackChoices.remember(TrackType.SUBTITLE, track)
                 }
 
                 TrackType.AUDIO -> {
@@ -212,8 +212,11 @@ class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
                         MPVLib.setPropertyString("aid", "no")
                     }
 
-                    playerManager.currentTrackChoices.audioSelectionIndexMpv = track?.index ?: -1
+                    playerManager.currentTrackChoices.remember(TrackType.AUDIO, track)
                 }
+
+                // This engine reports no video track selection, so the card never offers it.
+                TrackType.VIDEO -> Unit
             }
         }
     }
@@ -251,31 +254,7 @@ class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
 
     override suspend fun reapplyTrackChoices() {
         if (!isInitialized) return
-        withContext(Dispatchers.Main.immediate) {
-            val subIndex = playerManager.currentTrackChoices.subtitleSelectionIndexMpv
-            val audioIndex = playerManager.currentTrackChoices.audioSelectionIndexMpv
-
-
-            val ccMap = playerManager.media.value?.tracks?.filter { it.type == TrackType.SUBTITLE }
-            val audioMap = playerManager.media.value?.tracks?.filter { it.type == TrackType.AUDIO }
-
-            val ccGet = ccMap?.firstOrNull { it.index == subIndex }
-            val audioGet = audioMap?.firstOrNull { it.index == audioIndex }
-
-            with(playerManager.player) {
-                if (subIndex == -1) {
-                    selectTrack(null, TrackType.SUBTITLE)
-                } else if (ccGet != null) {
-                    selectTrack(ccGet, TrackType.SUBTITLE)
-                }
-
-                if (audioIndex == -1) {
-                    selectTrack(null, TrackType.AUDIO)
-                } else if (audioGet != null) {
-                    selectTrack(audioGet, TrackType.AUDIO)
-                }
-            }
-        }
+        withContext(Dispatchers.Main.immediate) { reapplyIndexedTrackChoices() }
     }
 
     override suspend fun loadExternalSubImpl(uri: PlatformFile, extension: String) {
