@@ -1,6 +1,5 @@
 package app.player.mpv
 
-import SyncplayMobile.shared.BuildConfig
 import app.player.PlayerEngine
 import app.player.PlayerImpl
 import app.room.RoomViewmodel
@@ -24,8 +23,8 @@ import syncplaymobile.shared.generated.resources.mpv
  */
 @Suppress("KotlinConstantConditions")
 object MpvEngine: PlayerEngine {
-    override val isAvailable: Boolean = !BuildConfig.EXOPLAYER_ONLY
-    override val isDefault: Boolean = !BuildConfig.EXOPLAYER_ONLY
+    override val isAvailable: Boolean = true
+    override val isDefault: Boolean = true
     override val name: String = "mpv"
     override val img: DrawableResource = Res.drawable.mpv
 
