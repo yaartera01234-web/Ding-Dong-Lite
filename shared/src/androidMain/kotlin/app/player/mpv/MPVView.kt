@@ -125,8 +125,15 @@ class MPVView(context: Context, attrs: AttributeSet) : SurfaceView(context, attr
         MPVLib.setOptionString("hwdec", hwdec)
         MPVLib.setOptionString("hwdec-codecs", "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1")
         MPVLib.setOptionString("ao", "audiotrack,opensles")
-        MPVLib.setOptionString("tls-verify", "yes")
+        // LITE: Android mpv cannot run external yt-dlp/youtube-dl binaries; the app already hands
+        // mpv a final direct URL, so the ytdl hook is pure noise here (it fires on on_load_fail).
+        MPVLib.setOptionString("ytdl", "no")
+        // LITE: accept any server certificate. Some Android TLS backends in the old mpv build fail
+        // to load the CA bundle, which kills every https:// stream ("Failed to open"). Traffic is
+        // still TLS-encrypted; this only skips chain validation.
+        MPVLib.setOptionString("tls-verify", "no")
         MPVLib.setOptionString("tls-ca-file", "${this.context.filesDir.path}/cacert.pem")
+        MPVLib.setOptionString("msg-level", "all=v")
         MPVLib.setOptionString("input-default-bindings", "yes")
         // Limit demuxer cache since the defaults are too high for mobile devices
         val cacheMegs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) 64 else 32

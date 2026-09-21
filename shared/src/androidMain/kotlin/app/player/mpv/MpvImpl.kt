@@ -51,6 +51,26 @@ import kotlin.time.Duration.Companion.milliseconds
 class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
     lateinit var audioManager: AudioManager
     var mpvPos = 0L
+    // TEMP DIAG: full mpv log ring buffer + "did playback ever start" flag.
+    private val diagRing = java.util.ArrayDeque<String>()
+    private var playbackStarted = false
+
+    private fun diagReset() {
+        synchronized(diagRing) { diagRing.clear() }
+        playbackStarted = false
+    }
+
+    private fun diagDump() {
+        val lines = synchronized(diagRing) { diagRing.toList() }
+        val tail = if (lines.size > 30) lines.subList(lines.size - 30, lines.size) else lines
+        playerScopeIO.launch {
+            viewmodel.dispatcher.broadcastMessage(message = { "DIAG mpv log dump (${tail.size} lines):" }, isChat = false, isError = true)
+            for (l in tail) {
+                viewmodel.dispatcher.broadcastMessage(message = { "DIAGLOG $l" }, isChat = false, isError = true)
+            }
+        }
+    }
+
     private lateinit var observer: MPVLib.EventObserver
     lateinit var mpvView: MPVView
     private lateinit var ctx: Context
@@ -269,6 +289,7 @@ class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
     override suspend fun injectVideoFileImpl(location: MediaFileLocation.Local) {
         installMpvSubfontIfNeeded()
         ctx.resolveUri(location.file.uri)?.let {
+            diagReset()
             if (isInitialized) MPVLib.destroy()
             mpvView.initialize(ctx.filesDir.path, ctx.cacheDir.path)
             mpvObserverAttach()
@@ -281,6 +302,7 @@ class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
         playerScopeIO.launch {
             viewmodel.dispatcher.broadcastMessage(message = { "DIAG mpv load: ${location.url.take(70)}" }, isChat = false, isError = true)
         }
+        diagReset()
         if (isInitialized) MPVLib.destroy()
         mpvView.initialize(ctx.filesDir.path, ctx.cacheDir.path)
         mpvObserverAttach()
@@ -384,12 +406,19 @@ class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
     private fun mpvObserverAttach() {
         removeObserver()
 
-        // TEMP DIAG: surface mpv's own error/warn log lines in room chat.
+        // LITE: hard-force safe options after every mpv (re)init so a stale config can't re-enable them.
+        MPVLib.setPropertyString("ytdl", "no")
+
+        // TEMP DIAG: keep the full mpv log in a ring buffer; live-broadcast warn/error lines.
         MPVLib.addLogObserver(object : MPVLib.LogObserver {
             override fun logMessage(prefix: String, level: Int, text: String) {
+                synchronized(diagRing) {
+                    if (diagRing.size >= 120) diagRing.removeFirst()
+                    diagRing.addLast("L$level $prefix$text")
+                }
                 if (level <= MPVLib.MpvLogLevel.MPV_LOG_LEVEL_WARN) {
                     playerScopeIO.launch {
-                        viewmodel.dispatcher.broadcastMessage(message = { "DIAG mpv: $text" }, isChat = false, isError = true)
+                        viewmodel.dispatcher.broadcastMessage(message = { "DIAG mpv: $prefix$text" }, isChat = false, isError = true)
                     }
                 }
             }
@@ -400,8 +429,14 @@ class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
 
             override fun eventProperty(property: String, value: Long) {
                 when (property) {
-                    "time-pos" -> mpvPos = value * 1000
-                    "duration" -> playerManager.timeFullMillis.value = value * 1000
+                    "time-pos" -> {
+                        mpvPos = value * 1000
+                        if (value > 0) playbackStarted = true
+                    }
+                    "duration" -> {
+                        playerManager.timeFullMillis.value = value * 1000
+                        if (value > 0) playbackStarted = true
+                    }
                     //"file-size" -> value
                 }
             }
@@ -438,6 +473,7 @@ class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
                     }
 
                     MPVLib.MpvEvent.MPV_EVENT_END_FILE -> {
+                        if (!playbackStarted) diagDump()
                         playerScopeIO.launch {
                             viewmodel.dispatcher.broadcastMessage(message = { "DIAG mpv end-file err=${MPVLib.getPropertyString("error") ?: "-"}" }, isChat = false, isError = true)
                         }
