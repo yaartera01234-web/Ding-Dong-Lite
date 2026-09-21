@@ -384,6 +384,17 @@ class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
     private fun mpvObserverAttach() {
         removeObserver()
 
+        // TEMP DIAG: surface mpv's own error/warn log lines in room chat.
+        MPVLib.addLogObserver(object : MPVLib.LogObserver {
+            override fun logMessage(prefix: String, level: Int, text: String) {
+                if (level <= MPVLib.MpvLogLevel.MPV_LOG_LEVEL_WARN) {
+                    playerScopeIO.launch {
+                        viewmodel.dispatcher.broadcastMessage(message = { "DIAG mpv: $text" }, isChat = false, isError = true)
+                    }
+                }
+            }
+        })
+
         observer = object : MPVLib.EventObserver {
             override fun eventProperty(property: String) {}
 
