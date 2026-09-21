@@ -278,6 +278,9 @@ class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
 
     override suspend fun injectVideoURLImpl(location: MediaFileLocation.Remote) {
         installMpvSubfontIfNeeded()
+        playerScopeIO.launch {
+            viewmodel.dispatcher.broadcastMessage(message = { "DIAG mpv load: ${location.url.take(70)}" }, isChat = false, isError = true)
+        }
         if (isInitialized) MPVLib.destroy()
         mpvView.initialize(ctx.filesDir.path, ctx.cacheDir.path)
         mpvObserverAttach()
@@ -406,6 +409,9 @@ class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
             override fun event(eventId: Int) {
                 when (eventId) {
                     MPVLib.MpvEvent.MPV_EVENT_START_FILE -> {
+                        playerScopeIO.launch {
+                            viewmodel.dispatcher.broadcastMessage(message = { "DIAG mpv start-file" }, isChat = false, isError = true)
+                        }
                         if (viewmodel.isSoloMode) return
                         playerScopeIO.launch {
                             while (true) {
@@ -421,6 +427,9 @@ class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
                     }
 
                     MPVLib.MpvEvent.MPV_EVENT_END_FILE -> {
+                        playerScopeIO.launch {
+                            viewmodel.dispatcher.broadcastMessage(message = { "DIAG mpv end-file err=${MPVLib.getPropertyString("error") ?: "-"}" }, isChat = false, isError = true)
+                        }
                         playerScopeMain.launch {
                             pause()
                             onPlaybackEnded()
