@@ -36,8 +36,8 @@ object MpvFileUtils {
                 ins.copyTo(out)
                 loggy("Copied asset file: $filename")
             } catch (e: IOException) {
+                e.printStackTrace()
                 loggy("Failed to copy asset file: $filename")
-                loggy(e)
             } finally {
                 ins?.close()
                 out?.close()
@@ -60,6 +60,28 @@ object MpvFileUtils {
         return filepath
     }
 
+
+//    private fun openContentFd(context: Context, uri: Uri): String? {
+//        val resolver = context.applicationContext.contentResolver
+//        Log.e("mpv", "Resolving content URI: $uri")
+//        val fd = try {
+//            val desc = resolver.openFileDescriptor(uri, "r")
+//            desc!!.detachFd()
+//        } catch (e: Exception) {
+//            Log.e("mpv", "Failed to open content fd: $e")
+//            return null
+//        }
+//        // See if we skip the indirection and read the real file directly
+//        val path = findRealPath(fd)
+//        if (path != null) {
+//            Log.e("mpv", "Found real file path: $path")
+//            ParcelFileDescriptor.adoptFd(fd).close() // we don't need that anymore
+//            return path
+//        }
+//        // Else, pass the fd to mpv
+//        return "fd://${fd}"
+//    }
+
     private fun openContentFd(context: Context, uri: Uri): String? {
         val resolver = context.applicationContext.contentResolver
         Log.e("mpv", "Resolving content URI: $uri")
@@ -79,14 +101,10 @@ object MpvFileUtils {
             return path
         }
 
-        /* No real path: detach and hand the descriptor to mpv.
-         *
-         * fdclose://, not fd://. The comment here used to claim mpv takes ownership of an fd://
-         * descriptor, and it does not: stream_file.c borrows one and closes only the fdclose://
-         * form. Every SAF file opened this way leaked a descriptor, and a process has a limited
-         * number of them. */
+        // No real path — detach and pass fd ownership to mpv
+        // mpv WILL close this fd when it's done with it (it takes ownership of fd:// fds)
         val fd = desc.detachFd()
-        return "fdclose://${fd}"
+        return "fd://${fd}"
     }
 
     private fun findRealPath(fd: Int): String? {

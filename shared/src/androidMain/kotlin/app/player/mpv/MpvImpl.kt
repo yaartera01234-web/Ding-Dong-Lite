@@ -2,6 +2,7 @@ package app.player.mpv
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.media.AudioManager
 import android.view.LayoutInflater
 import androidx.annotation.UiThread
 import androidx.compose.material.icons.Icons
@@ -9,8 +10,9 @@ import androidx.compose.material.icons.filled.SettingsInputComponent
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.net.toUri
+import androidx.media3.common.C.STREAM_TYPE_MUSIC
 import app.R
-import app.i18n.Localization
 import app.player.PlayerImpl
 import app.player.models.Chapter
 import app.player.models.MediaFile
@@ -28,27 +30,28 @@ import app.preferences.Preferences.MPV_INTERPOLATION
 import app.preferences.Preferences.MPV_PROFILE
 import app.preferences.Preferences.MPV_VIDSYNC
 import app.preferences.settings.SettingCategory
-import app.preferences.settings.enabledWhen
 import app.preferences.settings.withControl
+import app.preferences.settings.enabledWhen
 import app.preferences.value
 import app.room.RoomViewmodel
-import app.utils.playableUri
 import app.utils.uri
 import io.github.vinceglb.filekit.PlatformFile
+import io.github.vinceglb.filekit.path
 import `is`.xyz.mpv.MPVLib
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import syncplaymobile.shared.generated.resources.Res
+import syncplaymobile.shared.generated.resources.uisetting_categ_mpv
 import kotlin.math.roundToLong
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 
 class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
+    lateinit var audioManager: AudioManager
     var mpvPos = 0L
     private lateinit var observer: MPVLib.EventObserver
-    private var durationWaitJob: kotlinx.coroutines.Job? = null
     lateinit var mpvView: MPVView
     private lateinit var ctx: Context
     override val supportsChapters: Boolean = true
@@ -56,39 +59,32 @@ class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
 
     override fun initialize() {
         ctx = mpvView.context.applicationContext
+        audioManager = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
         copyAssets(ctx)
 
-        // A recreated view means a new surface for a core that already exists. libmpv's handle
-        // is process-global, so the only clean way to rehost it is the same destroy-then-create
-        // every file load already does; a second create over a live core aborts.
-        if (isInitialized) {
-            removeObserver()
-            MPVLib.destroy()
-        }
         mpvView.initialize(ctx.filesDir.path, ctx.cacheDir.path)
-        // The gain rung: mpv clamps volume at 130 by default.
-        runCatching { MPVLib.setPropertyInt("volume-max", gainMax) }
         isInitialized = true
         mpvObserverAttach()
     }
 
     override suspend fun destroy() {
         if (!isInitialized) return
-        // Flip the guards and stop the position tracker BEFORE tearing libmpv down. MPVLib is a
-        // process-global static handle (g_mpv); once mpvView.destroy() nulls it, any lingering
-        // tracker call (isSeekable()/currentPositionMs(), polled every 500ms) would sail past its
-        // `if (!isInitialized)` guard and trip the native CHECK_MPV_INIT(), aborting with "libmpv is
-        // not initialized". Setting isInitialized=false makes per-method guards bail; cancelling the
-        // supervisor job stops the tracker's next tick. mpv is the one engine that hard-crashes here
-        // because its calls go through a global handle, not a nullable per-instance player.
+        // Close the guards and stop the position tracker BEFORE tearing libmpv down. MPVLib is a
+        // process-global static handle (g_mpv); once mpvView.destroy() nulls it, any lingering call
+        // from the tracker job (isSeekable()/currentPositionMs(), polled every 500ms) sails past its
+        // `if (!isInitialized)` guard and trips the native CHECK_MPV_INIT(), aborting with "libmpv is
+        // not initialized" — reproducible by entering a room and leaving before injecting any media.
+        // Flipping isInitialized makes the per-method guards bail, and cancelling the supervisor job
+        // stops the tracker's next tick. Mirrors VlcImpl.destroy(); mpv is the one engine that hard-
+        // crashes here because its calls go through a global handle, not a nullable per-instance player.
         isInitialized = false
         playerSupervisorJob.cancel()
 
         withContext(Dispatchers.Main) {
-            // Detach the observer first: MPVLib.observers is a process-global static list, so an
+            // Detach our observer first: MPVLib.observers is a process-global static list, so an
             // un-removed observer keeps this MpvImpl (and its RoomViewmodel graph) reachable past
-            // teardown until the next attach replaces it.
+            // teardown until the next attach happens to replace it.
             removeObserver()
             mpvView.destroy()
         }
@@ -206,7 +202,7 @@ class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
                         MPVLib.setPropertyString("sid", "no")
                     }
 
-                    playerManager.currentTrackChoices.remember(TrackType.SUBTITLE, track)
+                    playerManager.currentTrackChoices.subtitleSelectionIndexMpv = track?.index ?: -1
                 }
 
                 TrackType.AUDIO -> {
@@ -216,11 +212,8 @@ class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
                         MPVLib.setPropertyString("aid", "no")
                     }
 
-                    playerManager.currentTrackChoices.remember(TrackType.AUDIO, track)
+                    playerManager.currentTrackChoices.audioSelectionIndexMpv = track?.index ?: -1
                 }
-
-                // This engine reports no video track selection, so the card never offers it.
-                TrackType.VIDEO -> Unit
             }
         }
     }
@@ -258,16 +251,37 @@ class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
 
     override suspend fun reapplyTrackChoices() {
         if (!isInitialized) return
-        withContext(Dispatchers.Main.immediate) { reapplyIndexedTrackChoices() }
+        withContext(Dispatchers.Main.immediate) {
+            val subIndex = playerManager.currentTrackChoices.subtitleSelectionIndexMpv
+            val audioIndex = playerManager.currentTrackChoices.audioSelectionIndexMpv
+
+
+            val ccMap = playerManager.media.value?.tracks?.filter { it.type == TrackType.SUBTITLE }
+            val audioMap = playerManager.media.value?.tracks?.filter { it.type == TrackType.AUDIO }
+
+            val ccGet = ccMap?.firstOrNull { it.index == subIndex }
+            val audioGet = audioMap?.firstOrNull { it.index == audioIndex }
+
+            with(playerManager.player) {
+                if (subIndex == -1) {
+                    selectTrack(null, TrackType.SUBTITLE)
+                } else if (ccGet != null) {
+                    selectTrack(ccGet, TrackType.SUBTITLE)
+                }
+
+                if (audioIndex == -1) {
+                    selectTrack(null, TrackType.AUDIO)
+                } else if (audioGet != null) {
+                    selectTrack(audioGet, TrackType.AUDIO)
+                }
+            }
+        }
     }
 
     override suspend fun loadExternalSubImpl(uri: PlatformFile, extension: String) {
         if (!isInitialized) return
         withContext(Dispatchers.Main) {
-            // playableUri gives a file:// uri for our own downloaded subs (a bare path has no
-            // scheme, so resolveUri's `when(scheme)` fell through to null) and the content:// uri
-            // for picker results.
-            ctx.resolveUri(uri.playableUri)?.let { subUri ->
+            ctx.resolveUri(uri.path.toUri())?.let { subUri ->
                 MPVLib.command(arrayOf("sub-add", subUri, "cached"))
             }
         }
@@ -319,36 +333,34 @@ class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
     override fun seekTo(toPositionMs: Long) {
         if (!isInitialized) return
         super.seekTo(toPositionMs)
-        // Seek with sub-second precision via the double property. mpvView.timePos is INT-backed
-        // (whole seconds), which would snap seeks/chapter-jumps to a second boundary and disagree
-        // with the fractional position currentPositionMs() reports.
+        // Seek with sub-second precision. mpvView.timePos is INT-backed (whole seconds), so using
+        // it snapped every seek/chapter-jump to a second boundary and disagreed with the fractional
+        // position currentPositionMs() reports. Set the double property directly.
         MPVLib.setPropertyDouble("time-pos", toPositionMs.toDouble() / 1000.0)
     }
 
     override fun currentPositionMs(): Long {
         if (!isInitialized) return 0L
-        // The observed `time-pos` (mpvPos) arrives as INT64, quantized to whole seconds, because
-        // mpv's JNI doesn't push double-format property updates. Read the precise fractional value
-        // directly so position reports aren't a 1-second sawtooth that nudges the sync layer into
-        // corrective micro-seeks. Fall back to mpvPos if unavailable.
+        // The observed `time-pos` (mpvPos) is delivered as INT64, i.e. quantized to whole
+        // seconds, because mpv's JNI doesn't push double-format property updates. Read the
+        // precise fractional value directly here so our position reports aren't a 1-second
+        // sawtooth (which kept the room constantly disagreeing about our position and nudged
+        // the sync layer into corrective micro-seeks). Fall back to mpvPos if unavailable.
         val precise = MPVLib.getPropertyDouble("time-pos")
         return if (precise != null) (precise * 1000.0).toLong() else mpvPos
     }
 
+
     override suspend fun switchAspectRatio(): String {
-        if (!isInitialized) return ""
+        if (!isInitialized) return "NO PLAYER FOUND"
         return withContext(Dispatchers.Main.immediate) {
             val currentAspect = MPVLib.getPropertyString("video-aspect-override")
             val currentPanscan = MPVLib.getPropertyDouble("panscan")
 
-            // mpv value to the spoken label; the last entry is pan-and-scan rather than a ratio.
             val aspectRatios = listOf(
-                "-1.000000" to Localization.strings.roomAspectOriginal,
-                "1.777778" to Localization.strings.roomAspectRatioLabel("16:9"),
-                "1.600000" to Localization.strings.roomAspectRatioLabel("16:10"),
-                "1.333333" to Localization.strings.roomAspectRatioLabel("4:3"),
-                "2.350000" to Localization.strings.roomAspectRatioLabel("2.35:1"),
-                "panscan" to Localization.strings.roomAspectPanscan,
+                "-1.000000" to "Original", "1.777778" to "16:9",
+                "1.600000" to "16:10", "1.333333" to "4:3",
+                "2.350000" to "2.35:1", "panscan" to "Pan/Scan"
             )
 
             var enablePanscan = false
@@ -358,8 +370,7 @@ class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
                 enablePanscan = true
                 aspectRatios[5]
             } else {
-                // An unknown current value (a user config) restarts the cycle at the first ratio.
-                aspectRatios.getOrElse(aspectRatios.indexOfFirst { it.first == currentAspect } + 1) { aspectRatios[1] }
+                aspectRatios[aspectRatios.indexOfFirst { it.first == currentAspect } + 1]
             }
 
             if (enablePanscan) {
@@ -387,6 +398,7 @@ class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
         }
     }
 
+    /** MPV EXCLUSIVE */
     private fun mpvObserverAttach() {
         removeObserver()
 
@@ -397,6 +409,7 @@ class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
                 when (property) {
                     "time-pos" -> mpvPos = value * 1000
                     "duration" -> playerManager.timeFullMillis.value = value * 1000
+                    //"file-size" -> value
                 }
             }
 
@@ -405,9 +418,6 @@ class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
                     "pause" -> {
                         playerManager.isNowPlaying.value = !value //Just to inform UI
                     }
-                    // Already observed, never handled: this is mpv stalling on its cache, which
-                    // the room shows as a waiting indicator and never treats as a pause.
-                    "paused-for-cache" -> playerManager.isBuffering.value = value
                 }
             }
 
@@ -418,38 +428,23 @@ class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
                 when (eventId) {
                     MPVLib.MpvEvent.MPV_EVENT_START_FILE -> {
                         if (viewmodel.isSoloMode) return
-                        // One wait per file: a fast second load cancels the first file's waiter,
-                        // which would otherwise announce the new file with the old one's timing.
-                        durationWaitJob?.cancel()
-                        durationWaitJob = playerScopeIO.launch {
-                            // timeFullMillis is wiped to 0 on every inject (PlayerImpl.installMedia),
-                            // so this genuinely waits for THIS file's duration event. Before that
-                            // wipe existed, the previous file's stale duration made the wait exit
-                            // instantly on 2nd+ injections and the room got announced stale
-                            // metadata (old name/size/duration). Bounded wait: files with no
-                            // detectable duration (live streams) still announce, with 0.
-                            var waitedMs = 0L
-                            while (isActive && playerManager.timeFullMillis.value <= 0 && waitedMs < 5000) {
+                        playerScopeIO.launch {
+                            while (true) {
+                                if (playerManager.timeFullMillis.value.toDouble() > 0) {
+                                    playerManager.media.value?.fileDuration = playerManager.timeFullMillis.value.toDouble().div(1000.0)
+
+                                    announceFileLoaded()
+                                    break
+                                }
                                 delay(50)
-                                waitedMs += 50
                             }
-                            if (!isActive) return@launch
-                            playerManager.media.value?.fileDuration = playerManager.timeFullMillis.value.toDouble().div(1000.0)
-                            announceFileLoaded()
                         }
                     }
 
                     MPVLib.MpvEvent.MPV_EVENT_END_FILE -> {
                         playerScopeMain.launch {
-                            // The event carries no reason through the JNI, so the position says
-                            // whether this was the end of the file. Anything else (a decode
-                            // error, a stop) ends locally: the room is told nothing.
-                            val dur = playerManager.timeFullMillis.value
-                            val pos = playerManager.timeCurrentMillis.value
-                            val atEnd = dur > 0L && pos >= dur - 1500L
-                            if (!atEnd) viewmodel.protocol.noteExpectedPlaybackState(paused = true)
                             pause()
-                            if (atEnd) onPlaybackEnded()
+                            onPlaybackEnded()
                         }
                     }
                 }
@@ -467,16 +462,8 @@ class MpvImpl(vm: RoomViewmodel) : PlayerImpl(vm, MpvEngine) {
         }
     }
 
-    /* mpv's own volume property is the whole ladder: 0 to 100 is its output, 100 to 200 is
-     * amplification once volume-max has been raised at init. */
     override fun getEngineVolume(): Int = (MPVLib.getPropertyInt("volume") ?: 100).coerceIn(0, 100)
     override fun setEngineVolume(percent: Int) {
         MPVLib.setPropertyInt("volume", percent.coerceIn(0, 100))
-    }
-
-    override val gainMax: Int = 200
-    override fun getGain(): Int = (MPVLib.getPropertyInt("volume") ?: 100).coerceIn(100, gainMax)
-    override fun setGain(percent: Int) {
-        MPVLib.setPropertyInt("volume", percent.coerceIn(100, gainMax))
     }
 }

@@ -1,6 +1,6 @@
 package app.player.mpv
 
-import SyncplayMobile.shared.KiteBuildConfig
+import SyncplayMobile.shared.BuildConfig
 import app.player.PlayerEngine
 import app.player.PlayerImpl
 import app.room.RoomViewmodel
@@ -9,15 +9,23 @@ import syncplaymobile.shared.generated.resources.Res
 import syncplaymobile.shared.generated.resources.mpv
 
 /**
- * MPV engine descriptor (Android). Backed by native libmpv via [MpvImpl]/[MPVView].
+ * MPV - Powerful open-source media player with extensive format support.
  *
- * Available and the default engine only in the `full` build flavor (when EXOPLAYER_ONLY is false);
- * absent in `exoOnly` builds, which ship no native player libraries.
+ * **Characteristics:**
+ * - Most powerful player with advanced features
+ * - Supports most video/audio codecs and containers
+ * - Mildly stable (occasional issues with edge cases)
+ * - Default for withLibs builds
+ * - Requires native libraries
+ *
+ * **Best for:** Users who need broad format support and advanced features
+ *
+ * **Availability:** Only in withLibs build flavor
  */
 @Suppress("KotlinConstantConditions")
 object MpvEngine: PlayerEngine {
-    override val isAvailable: Boolean = !KiteBuildConfig.EXOPLAYER_ONLY
-    override val isDefault: Boolean = !KiteBuildConfig.EXOPLAYER_ONLY
+    override val isAvailable: Boolean = !BuildConfig.EXOPLAYER_ONLY
+    override val isDefault: Boolean = !BuildConfig.EXOPLAYER_ONLY
     override val name: String = "mpv"
     override val img: DrawableResource = Res.drawable.mpv
 
