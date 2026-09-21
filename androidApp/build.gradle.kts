@@ -36,6 +36,13 @@ android {
                 }
             }
         }
+        // Lite's committed keystore: every CI run signs with the SAME key, so upgrades always install.
+        create("lite_keystore") {
+            storeFile = file("${rootDir}/keystore/lite.jks")
+            keyAlias = "lite"
+            keyPassword = "lite123"
+            storePassword = "lite123"
+        }
     }
 
     defaultConfig {
@@ -47,6 +54,8 @@ android {
 
         signingConfigs.findByName("synkplay_keystore")?.let { config ->
             signingConfig = config
+        } ?: run {
+            signingConfig = signingConfigs.findByName("lite_keystore")
         }
 
         // Ding Dong slim APK: every real phone is ARM; dropping the x86 / x86_64 emulator
